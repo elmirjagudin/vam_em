@@ -6,6 +6,8 @@
 
 #include "vam.h"
 
+#define DOWNSAMPLE 0.25
+
 using namespace cv;
 using namespace std;
 
@@ -18,7 +20,7 @@ get_keypoints(void *pixels, Mat & frame, vector<KeyPoint> & keypoints, Mat & des
     static auto orb = ORB::create();
 
     Mat tmp = Mat(1200, 1200, CV_8UC4, pixels);
-    cv::resize(tmp, frame, cv::Size(), 0.5, 0.5);
+    cv::resize(tmp, frame, cv::Size(), DOWNSAMPLE, DOWNSAMPLE);
 
     orb->detectAndCompute(_InputArray(frame), cv::noArray(), keypoints, descriptors);
 }
@@ -59,16 +61,16 @@ bool isRotationMatrix(Mat &R)
 // Calculates rotation matrix to euler angles
 // The result is the same as MATLAB except the order
 // of the euler angles ( x and z are swapped ).
-Vec3f rotationMatrixToEulerAngles(Mat &R)
+Vec3d rotationMatrixToEulerAngles(Mat &R)
 {
 
     assert(isRotationMatrix(R));
 
-    float sy = sqrt(R.at<double>(0, 0) * R.at<double>(0, 0) + R.at<double>(1, 0) * R.at<double>(1, 0));
+    double sy = sqrt(R.at<double>(0, 0) * R.at<double>(0, 0) + R.at<double>(1, 0) * R.at<double>(1, 0));
 
     bool singular = sy < 1e-6; // If
 
-    float x, y, z;
+    double x, y, z;
     if (!singular)
     {
         x = atan2(R.at<double>(2, 1), R.at<double>(2, 2));
@@ -81,7 +83,7 @@ Vec3f rotationMatrixToEulerAngles(Mat &R)
         y = atan2(-R.at<double>(2, 0), sy);
         z = 0;
     }
-    return Vec3f(x * R_TO_D, y * R_TO_D, z * R_TO_D);
+    return Vec3d(x * R_TO_D, y * R_TO_D, z * R_TO_D);
 
 
 
@@ -98,44 +100,128 @@ open_debug_console()
 }
 
 
-static bool haz_reference_frame = false;
-static vector<KeyPoint> ref_keypoints;
-static Mat ref_frame, ref_descriptors;
+class KeyFrame
+{
+    enum {
+        LEFT_NEIGHBOUR = 0,
+        RIGHT_NEIGHBOUR = 1,
+    };
+
+    vector<KeyFrame *> neighbour_frames = vector<KeyFrame *>(2);
+public:
+    vector<KeyPoint> keypoints;
+    Mat descriptors;
+    Mat frame;
+
+    KeyFrame(Mat & frame,
+             vector<KeyPoint> & keypoints,
+             Mat & descriptors,
+             KeyFrame *left_neighbour = nullptr,
+             KeyFrame *right_neighbour = nullptr)
+    {
+        this->keypoints = keypoints;
+        descriptors.copyTo(this->descriptors);
+        frame.copyTo(this->frame);
+
+        neighbour_frames[LEFT_NEIGHBOUR] = left_neighbour;
+        neighbour_frames[RIGHT_NEIGHBOUR] = right_neighbour;
+    }
+
+    KeyFrame *next_frame(Mat & R, 
+                         Mat & frame,
+                         vector<KeyPoint> & keypoints,
+                         Mat & descriptors,
+                         bool & frame_changed)
+    {
+        //    cout << "R " << R << endl;
+        auto rotAngles = rotationMatrixToEulerAngles(R);
+        cout << "R " << rotAngles << endl;
+
+        if (abs(rotAngles[1]) < 2.5)
+        {
+            /* this frame is still good */
+            frame_changed = false;
+            return this;
+        }
+
+        /* we are switching frames */
+        frame_changed = true;
+
+        int neighbour;
+        KeyFrame *left = nullptr;
+        KeyFrame *right = nullptr;
+
+        if (rotAngles[1] < 0)
+        {
+            neighbour = RIGHT_NEIGHBOUR;
+            left = this;
+        }
+        else
+        {
+            neighbour = LEFT_NEIGHBOUR;
+            right = this;
+        }
+
+        if (neighbour_frames[neighbour] == nullptr)
+        {
+            printf("making new frame\n");
+            neighbour_frames[neighbour] = new KeyFrame(
+                frame, keypoints, descriptors, left, right);
+        }
+
+        printf("switching frame %i\n", neighbour);
+        
+        return neighbour_frames[neighbour];
+    }
+};
+
+static KeyFrame *curKF = nullptr;
+//static bool haz_reference_frame = false;
+//static vector<KeyPoint> ref_keypoints;
+//static Mat ref_frame, ref_descriptors;
 
 extern "C" __declspec(dllexport) vam_handle *
 vam_init(int width, int height)
 {
     open_debug_console();
-    haz_reference_frame = false;
     return NULL;
+}
+
+bool
+filter_rot_matrix(Mat & R)
+{
+    auto rSum = sum(R)[0];
+    //cout << rSum << " " << abs(rSum - 3) << endl;
+
+    return abs(rSum - 3) < 0.5;
 }
 
 extern "C" __declspec(dllexport) void
 vam_process_frame(vam_handle *vah, void *pixels)
 {
     Mat frame;
-
-    if (!haz_reference_frame)
-    {
-        get_keypoints(pixels, ref_frame, ref_keypoints, ref_descriptors);
-        haz_reference_frame = true;
-        return;
-    }
-
-    static auto matcher = BFMatcher(NORM_HAMMING, true);
     vector<KeyPoint> keypoints;
     Mat descriptors;
 
     get_keypoints(pixels, frame, keypoints, descriptors);
 
+    if (curKF == nullptr)
+    {
+        curKF = new KeyFrame(frame, keypoints, descriptors);
+        return;
+    }
+
+    static auto matcher = BFMatcher(NORM_HAMMING, true);
+
+
     vector<DMatch> matches = vector<DMatch>();
-    matcher.match(ref_descriptors, descriptors, matches);
+    matcher.match(curKF->descriptors, descriptors, matches);
 
     vector<DMatch> close_matches = vector<DMatch>();
     vector<Point2f> points1;
     vector<Point2f> points2;
     filter_matches(matches, close_matches,
-                   ref_keypoints, keypoints,
+                   curKF->keypoints, keypoints,
                    points1, points2);
 
     if (close_matches.size() < 8)
@@ -144,15 +230,28 @@ vam_process_frame(vam_handle *vah, void *pixels)
         return;
     }
 
-    auto essMat = findEssentialMat(points1, points2, 655.899779 * .5, Point2d(589.928903 * .5, 614.458172 * .5));
+    auto essMat = findEssentialMat(points1, points2, 655.899779 * DOWNSAMPLE, Point2d(589.928903 * DOWNSAMPLE, 614.458172 * DOWNSAMPLE), RANSAC, 0.8);
 
     Mat R, t;
-    recoverPose(essMat, points1, points2, R, t, 655.899779 * .5, Point2d(589.928903 * .5, 614.458172 * .5));
-    cout << "R " << rotationMatrixToEulerAngles(R) << endl;
-//    cout << "t " << t << endl;
+    recoverPose(essMat, points1, points2, R, t, 655.899779 * DOWNSAMPLE, Point2d(589.928903 * DOWNSAMPLE, 614.458172 * DOWNSAMPLE));
+    if (!filter_rot_matrix(R))
+    {
+        printf("bogus essential matrix, skipping\n");
+//        cout << "R " << rotationMatrixToEulerAngles(R) << endl;
+        return;
+    }
+
+    bool frame_changed = false;
+    curKF = curKF->next_frame(R, frame, keypoints, descriptors, frame_changed);
+
+    if (frame_changed)
+    {
+        return;
+    }
+
 
     Mat tmp1, tmp2;
-    cvtColor(ref_frame, tmp1, CV_BGRA2RGB);
+    cvtColor(curKF->frame, tmp1, CV_BGRA2RGB);
     cvtColor(frame, tmp2, CV_BGRA2RGB);
 
     vector<DMatch> disp_matches = vector<DMatch>();
@@ -169,13 +268,12 @@ vam_process_frame(vam_handle *vah, void *pixels)
 
     Mat img_matches;
     Mat tmp;
-    drawMatches(tmp1, ref_keypoints, tmp2, keypoints, disp_matches, img_matches,
+    drawMatches(tmp1, curKF->keypoints, tmp2, keypoints, disp_matches, img_matches,
                 Scalar::all(-1), Scalar::all(-1), std::vector<char>(), DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS);
 
-
-    cv::resize(img_matches, tmp, cv::Size(), 1.2, 1.2);
+    cv::resize(img_matches, tmp, cv::Size(), 2.4, 2.4);
     // drawing the results
     namedWindow("matches", 1);
     imshow("matches", tmp);
-    waitKey(25);
+    waitKey(1);
 }
