@@ -87,31 +87,6 @@ Vec3f rotationMatrixToEulerAngles(Mat &R)
 
 }
 
-void
-show_rot_angles(Mat & R1, Mat & R2)
-{
-    static Vec3f last_rot = Vec3f(0, 0, 0);
-
-    auto rot_angls1 = rotationMatrixToEulerAngles(R1);
-    auto rot_angls2 = rotationMatrixToEulerAngles(R2);
-
-    auto diff1 = norm(last_rot - rot_angls1);
-    auto diff2 = norm(last_rot - rot_angls2);
-
-    if (diff1 < diff2)
-    {
-        last_rot = rot_angls1;
-    }
-    else
-    {
-        last_rot = rot_angls2;
-    }
-
-    cout << last_rot << endl;
-//    cout << rot_angls1 << diff1 << endl;
-//    cout << rot_angls2 << diff2 << endl;
-}
-
 static void 
 open_debug_console()
 {
@@ -171,9 +146,10 @@ vam_process_frame(vam_handle *vah, void *pixels)
 
     auto essMat = findEssentialMat(points1, points2, 655.899779 * .5, Point2d(589.928903 * .5, 614.458172 * .5));
 
-    Mat R1, R2, t;
-    decomposeEssentialMat(essMat, R1, R2, t);
-    show_rot_angles(R1, R2);
+    Mat R, t;
+    recoverPose(essMat, points1, points2, R, t, 655.899779 * .5, Point2d(589.928903 * .5, 614.458172 * .5));
+    cout << "R " << rotationMatrixToEulerAngles(R) << endl;
+//    cout << "t " << t << endl;
 
     Mat tmp1, tmp2;
     cvtColor(ref_frame, tmp1, CV_BGRA2RGB);
