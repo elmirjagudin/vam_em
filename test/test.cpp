@@ -37,12 +37,13 @@ read_file(FILE *stream, void *buffer, size_t num_bytes)
 void
 read_raw_files(vam_handle *vah)
 {
-    int i = 0;
+
     string fname;
     FILE *stream;
     int width;
     int height;
 
+    int i = 0;
     while (raw_fname(i++, fname))
     {        
         if ((stream = _fsopen(fname.c_str(), "rb", _SH_DENYNO)) == NULL)

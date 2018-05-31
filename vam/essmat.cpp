@@ -84,9 +84,6 @@ Vec3d rotationMatrixToEulerAngles(Mat &R)
         z = 0;
     }
     return Vec3d(x * R_TO_D, y * R_TO_D, z * R_TO_D);
-
-
-
 }
 
 static void 
@@ -102,7 +99,8 @@ open_debug_console()
 
 class KeyFrame
 {
-    enum {
+    enum
+    {
         LEFT_NEIGHBOUR = 0,
         RIGHT_NEIGHBOUR = 1,
     };
@@ -112,12 +110,14 @@ public:
     vector<KeyPoint> keypoints;
     Mat descriptors;
     Mat frame;
+    Mat R;
 
     KeyFrame(Mat & frame,
              vector<KeyPoint> & keypoints,
              Mat & descriptors,
              KeyFrame *left_neighbour = nullptr,
-             KeyFrame *right_neighbour = nullptr)
+             KeyFrame *right_neighbour = nullptr,
+             Mat R = Mat::eye(3, 3, CV_64F))
     {
         this->keypoints = keypoints;
         descriptors.copyTo(this->descriptors);
@@ -125,7 +125,11 @@ public:
 
         neighbour_frames[LEFT_NEIGHBOUR] = left_neighbour;
         neighbour_frames[RIGHT_NEIGHBOUR] = right_neighbour;
+
+        R.copyTo(this->R);
     }
+
+    
 
     KeyFrame *next_frame(Mat & R, 
                          Mat & frame,
@@ -135,7 +139,9 @@ public:
     {
         //    cout << "R " << R << endl;
         auto rotAngles = rotationMatrixToEulerAngles(R);
-        cout << "R " << rotAngles << endl;
+        //cout << "R " << rotAngles << endl;
+        Mat globalR = R * this->R ;
+        cout << "global R " <<  rotationMatrixToEulerAngles(globalR) << endl;
 
         if (abs(rotAngles[1]) < 2.5)
         {
@@ -151,7 +157,7 @@ public:
         KeyFrame *left = nullptr;
         KeyFrame *right = nullptr;
 
-        if (rotAngles[1] < 0)
+        if (rotAngles[1] > 0)
         {
             neighbour = RIGHT_NEIGHBOUR;
             left = this;
@@ -164,12 +170,13 @@ public:
 
         if (neighbour_frames[neighbour] == nullptr)
         {
-            printf("making new frame\n");
+//            printf("making new frame\n");
             neighbour_frames[neighbour] = new KeyFrame(
-                frame, keypoints, descriptors, left, right);
+                frame, keypoints, descriptors, left, right,
+                R * this->R);
         }
 
-        printf("switching frame %i\n", neighbour);
+//        printf("switching frame %i\n", neighbour);
         
         return neighbour_frames[neighbour];
     }
@@ -230,13 +237,14 @@ vam_process_frame(vam_handle *vah, void *pixels)
         return;
     }
 
-    auto essMat = findEssentialMat(points1, points2, 655.899779 * DOWNSAMPLE, Point2d(589.928903 * DOWNSAMPLE, 614.458172 * DOWNSAMPLE), RANSAC, 0.8);
+    auto essMat = findEssentialMat(points2, points1, 655.899779 * DOWNSAMPLE, Point2d(589.928903 * DOWNSAMPLE, 614.458172 * DOWNSAMPLE), RANSAC, 0.8);
 
     Mat R, t;
-    recoverPose(essMat, points1, points2, R, t, 655.899779 * DOWNSAMPLE, Point2d(589.928903 * DOWNSAMPLE, 614.458172 * DOWNSAMPLE));
+    recoverPose(essMat, points2, points1, R, t, 655.899779 * DOWNSAMPLE, Point2d(589.928903 * DOWNSAMPLE, 614.458172 * DOWNSAMPLE));
+
     if (!filter_rot_matrix(R))
     {
-        printf("bogus essential matrix, skipping\n");
+//        printf("bogus essential matrix, skipping\n");
 //        cout << "R " << rotationMatrixToEulerAngles(R) << endl;
         return;
     }
@@ -248,7 +256,6 @@ vam_process_frame(vam_handle *vah, void *pixels)
     {
         return;
     }
-
 
     Mat tmp1, tmp2;
     cvtColor(curKF->frame, tmp1, CV_BGRA2RGB);
@@ -275,5 +282,5 @@ vam_process_frame(vam_handle *vah, void *pixels)
     // drawing the results
     namedWindow("matches", 1);
     imshow("matches", tmp);
-    waitKey(1);
+    waitKey(25);
 }
